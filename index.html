@@ -4,13 +4,16 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>QRコードリーダー (jsQR + Bootstrap)</title>
+    <title>QRコードリーダー</title>
 
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 
     <!-- Bootstrap JS for dismissible alerts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- favicon -->
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
 
     <style>
         /* --- UI調整 --- */
@@ -92,7 +95,7 @@
                         </div>
 
                         <div class="small text-muted">
-                            ※ カメラ権限を許可してください。HTTPS または localhost（http）での実行が必要です。<br>
+                            ※ カメラ権限を許可してください。<br>
                             <span id="protocolWarning" class="text-warning" style="display:none;">
                                 ⚠️ HTTPSではないため、一部のブラウザでカメラが動作しない可能性があります
                             </span>
@@ -315,7 +318,8 @@
             item.href = isUrl ? (data.startsWith('http') ? data : 'http://' + data) : '#';
             item.rel = 'noopener noreferrer';
             const time = new Date().toLocaleTimeString();
-            item.innerHTML = `<div class="d-flex w-100 justify-content-between"><div class="text-truncate">${escapeHtml(data)}</div><small class="text-muted">${time}</small></div>`;
+            const icon = isUrl ? '<span style="color:#0d6efd;">🔗</span> ' : '';
+            item.innerHTML = `<div class="d-flex w-100 justify-content-between"><div class="text-truncate">${icon}${escapeHtml(data)}</div><small class="text-muted">${time}</small></div>`;
             resultsEl.prepend(item);
         }
 
@@ -400,44 +404,9 @@
                 return;
             }
 
-            // Try to detect permission state; do not force a permission prompt here.
-            let permState = null;
-            try {
-                const p = await navigator.permissions.query({ name: 'camera' });
-                permState = p.state; // 'granted', 'denied', or 'prompt'
-
-                // 権限状態の表示
-                if (permState === 'denied') {
-                    showError('カメラ権限が拒否されています。ブラウザの設定からカメラアクセスを許可してください。');
-                }
-            } catch (e) {
-                // Permissions API or 'camera' name not supported in this browser
-                permState = null;
-            }
-
             await enumerateCameras();
-
-            // Auto-start only if permission already granted; otherwise wait for user action to start camera.
-            if (permState === 'granted') {
-                let environmentDevice = null;
-                for (const d of devices) {
-                    const lab = (d.label || '').toLowerCase();
-                    if (lab.includes('back') || lab.includes('rear') || lab.includes('environment') || lab.includes('背面') || lab.includes('後')) {
-                        environmentDevice = d;
-                        break;
-                    }
-                }
-
-                if (environmentDevice) {
-                    await startCamera(false, environmentDevice.deviceId);
-                } else {
-                    await startCamera(true, null);
-                }
-            } else {
-                // Do not prompt. User can click 起動 to start camera when ready.
-                toggleBtn.textContent = '起動';
-                scanning = false;
-            }
+            // ページ表示時に自動でカメラ起動
+            await startCamera(true, null);
 
             window.addEventListener('resize', () => {
                 if (video && video.readyState >= 2) resizeCanvases();
