@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>QRコードリーダー (jsQR + Bootstrap)</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Bootstrap JS for dismissible alerts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <style>
+        /* --- UI調整 --- */
+        .row.align-items-end .form-label {
+            font-weight: 500;
+        }
+
+        .row.align-items-end .form-select {
+            min-width: 120px;
+        }
+
+        .row.align-items-end .btn {
+            min-width: 110px;
+        }
+
+        @media (max-width: 767px) {
+            .row.align-items-end .btn {
+                width: 100%;
+            }
+
+            .row.align-items-end .d-flex {
+                flex-direction: column;
+                gap: 8px !important;
+            }
+        }
+
+        /* --- 既存 --- */
+        .video-wrap {
+            position: relative;
+            width: 100%;
+            padding-top: 56.25%;
+            /* 16:9 */
+            background: #000;
+            border-radius: .5rem;
+            overflow: hidden;
+        }
+
+        video,
+        canvas#overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        #results {
+            max-height: 40vh;
+            overflow: auto;
+        }
+    </style>
+</head>
+
+<body class="bg-light">
+    <div class="container py-4">
+        <h1 class="h4 mb-3">QRコードリーダー</h1>
+
+        <div class="row g-3">
+            <div class="col-12 col-lg-8">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="row align-items-end mb-3 g-2">
+                            <div class="col-12 col-md-6">
+                                <label class="form-label mb-1">カメラ選択</label>
+                                <select id="cameraSelect" class="form-select form-select-sm w-100"></select>
+                            </div>
+                            <div class="col-12 col-md-6 text-md-end mt-2 mt-md-0">
+                                <div class="d-flex justify-content-md-end gap-2">
+                                    <button id="switchBtn" class="btn btn-outline-primary btn-sm">背面優先で再起動</button>
+                                    <button id="toggleBtn" class="btn btn-danger btn-sm">停止</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="video-wrap mb-2">
+                            <video id="video" autoplay playsinline muted></video>
+                            <canvas id="overlay"></canvas>
+                        </div>
+
+                        <div class="small text-muted">
+                            ※ カメラ権限を許可してください。HTTPS または localhost（http）での実行が必要です。<br>
+                            <span id="protocolWarning" class="text-warning" style="display:none;">
+                                ⚠️ HTTPSではないため、一部のブラウザでカメラが動作しない可能性があります
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-lg-4">
+                <div class="card h-100">
+                    <div class="card-body d-flex flex-column">
+                        <h6 class="card-title">読み取り結果</h6>
+                        <div id="latest" class="mb-2 text-truncate" style="min-height:2em;">読み取り待ち...</div>
+                        <div class="mb-2">
+                            <button id="clearBtn" class="btn btn-outline-secondary btn-sm">リストをクリア</button>
+                        </div>
+                        <div id="results" class="list-group list-group-flush overflow-auto mt-2"></div>
+                        <div class="mt-auto pt-2 small text-muted">読み取るたびに下のリストへ追加されます。</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- jsQR (CDN) -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+
+    <script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const overlayCtx = overlay.getContext('2d');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const switchBtn = document.getElementById('switchBtn');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const resultsEl = document.getElementById('results');
+        const latestEl = document.getElementById('latest');
+        const clearBtn = document.getElementById('clearBtn');
+
+        let stream = null;
+        let devices = [];
+        let currentDeviceId = null;
+        let scanning = false; // start as stopped to avoid auto permission prompts
+        let rafId = null;
+        let lastScanned = { data: null, time: 0 };
+
+        const captureCanvas = document.createElement('canvas');
+        const captureCtx = captureCanvas.getContext('2d');
+
+        async function enumerateCameras() {
+            try {
+                const devs = await navigator.mediaDevices.enumerateDevices();
+                devices = devs.filter(d => d.kind === 'videoinput');
+                cameraSelect.innerHTML = '';
+                devices.forEach((d, idx) => {
+                    const opt = document.createElement('option');
+                    opt.value = d.deviceId;
+                    opt.text = d.label || `カメラ ${idx + 1}`;
+                    cameraSelect.appendChild(opt);
+                });
+            } catch (e) {
+                console.error('enumerateDevices error', e);
+            }
+        }
+
+        async function startCamera(preferEnvironment = true, deviceId = null) {
+            stopCamera();
+
+            // ブラウザサポートチェック
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showError('このブラウザはカメラアクセスに対応していません。最新のChrome/Edge/Firefox/Safariをお使いください。');
+                return;
+            }
+
+            try {
+                let constraints = {
+                    audio: false,
+                    video: {
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    }
+                };
+
+                if (deviceId) {
+                    constraints.video.deviceId = { exact: deviceId };
+                } else if (preferEnvironment) {
+                    constraints.video.facingMode = { ideal: 'environment' };
+                } else {
+                    constraints.video.facingMode = { ideal: 'user' };
+                }
+
+                stream = await navigator.mediaDevices.getUserMedia(constraints);
+            } catch (e) {
+                console.error('First attempt failed:', e);
+
+                // より緩い制約で再試行
+                try {
+                    stream = await navigator.mediaDevices.getUserMedia({
+                        video: {
+                            width: { ideal: 640 },
+                            height: { ideal: 480 }
+                        },
+                        audio: false
+                    });
+                } catch (err) {
+                    console.error('Second attempt failed:', err);
+                    handleCameraError(err);
+                    return;
+                }
+            }
+
+            video.srcObject = stream;
+            await video.play();
+
+            const track = stream.getVideoTracks()[0];
+            const settings = track.getSettings();
+            currentDeviceId = settings.deviceId || null;
+
+            resizeCanvases();
+            await enumerateCameras();
+            if (currentDeviceId) cameraSelect.value = currentDeviceId;
+
+            scanning = true;
+            toggleBtn.textContent = '停止';
+            tick();
+        }
+
+        function stopCamera() {
+            scanning = false;
+            if (rafId) cancelAnimationFrame(rafId);
+            if (stream) {
+                stream.getTracks().forEach(t => t.stop());
+                stream = null;
+            }
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+            toggleBtn.textContent = '起動';
+        }
+
+        function resizeCanvases() {
+            const rect = video.getBoundingClientRect();
+            overlay.width = rect.width;
+            overlay.height = rect.height;
+
+            const track = stream && stream.getVideoTracks()[0];
+            const settings = track ? track.getSettings() : {};
+            const w = settings.width || video.videoWidth || 640;
+            const h = settings.height || video.videoHeight || 480;
+            captureCanvas.width = w;
+            captureCanvas.height = h;
+        }
+
+        function drawLine(ctx, begin, end, color) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.moveTo(begin.x, begin.y);
+            ctx.lineTo(end.x, end.y);
+            ctx.stroke();
+        }
+
+        function mapPointToOverlay(point, videoW, videoH) {
+            const overlayW = overlay.width;
+            const overlayH = overlay.height;
+            return {
+                x: point.x * (overlayW / videoW),
+                y: point.y * (overlayH / videoH)
+            };
+        }
+
+        function tick() {
+            if (!scanning || !stream) return;
+            if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+                rafId = requestAnimationFrame(tick);
+                return;
+            }
+
+            resizeCanvases();
+
+            const videoW = captureCanvas.width;
+            const videoH = captureCanvas.height;
+            captureCtx.drawImage(video, 0, 0, videoW, videoH);
+
+            const imageData = captureCtx.getImageData(0, 0, videoW, videoH);
+
+            const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" });
+
+            overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+
+            if (code) {
+                const p0 = mapPointToOverlay(code.location.topLeftCorner, videoW, videoH);
+                const p1 = mapPointToOverlay(code.location.topRightCorner, videoW, videoH);
+                const p2 = mapPointToOverlay(code.location.bottomRightCorner, videoW, videoH);
+                const p3 = mapPointToOverlay(code.location.bottomLeftCorner, videoW, videoH);
+
+                drawLine(overlayCtx, p0, p1, '#00FF00');
+                drawLine(overlayCtx, p1, p2, '#00FF00');
+                drawLine(overlayCtx, p2, p3, '#00FF00');
+                drawLine(overlayCtx, p3, p0, '#00FF00');
+
+                const now = Date.now();
+                const data = code.data ? String(code.data).trim() : '';
+
+                if (data && (data !== lastScanned.data || (now - lastScanned.time) > 1500)) {
+                    lastScanned = { data, time: now };
+                    addResult(data);
+                }
+
+                latestEl.textContent = data || '読み取り: 空';
+            } else {
+                latestEl.textContent = '読み取り待ち...';
+            }
+
+            rafId = requestAnimationFrame(tick);
+        }
+
+        function addResult(data) {
+            const item = document.createElement('a');
+            item.className = 'list-group-item list-group-item-action';
+            item.target = '_blank';
+            const isUrl = /^https?:\/\//i.test(data) || /^www\./i.test(data);
+            item.href = isUrl ? (data.startsWith('http') ? data : 'http://' + data) : '#';
+            item.rel = 'noopener noreferrer';
+            const time = new Date().toLocaleTimeString();
+            item.innerHTML = `<div class="d-flex w-100 justify-content-between"><div class="text-truncate">${escapeHtml(data)}</div><small class="text-muted">${time}</small></div>`;
+            resultsEl.prepend(item);
+        }
+
+        function escapeHtml(s) {
+            return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+        }
+
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'alert alert-danger alert-dismissible fade show mt-2';
+            errorDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            document.querySelector('.container').insertBefore(errorDiv, document.querySelector('.row'));
+
+            // 10秒後に自動削除
+            setTimeout(() => {
+                if (errorDiv.parentNode) {
+                    errorDiv.remove();
+                }
+            }, 10000);
+        }
+
+        function handleCameraError(error) {
+            let message = 'カメラを起動できませんでした。';
+
+            if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                message = `
+                    <strong>カメラ権限が拒否されています</strong><br>
+                    <small>
+                    • ブラウザのアドレスバー左側のカメラアイコンをクリックして許可してください<br>
+                    • Chrome: 設定 → プライバシーとセキュリティ → サイトの設定 → カメラ<br>
+                    • Edge: 設定 → サイトのアクセス許可 → カメラ<br>
+                    • Firefox: アドレスバー左側の盾アイコン → 権限<br>
+                    • Safari: 環境設定 → Webサイト → カメラ
+                    </small>
+                `;
+            } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+                message = 'カメラが見つかりません。カメラが接続されているか確認してください。';
+            } else if (error.name === 'NotSupportedError') {
+                message = 'このブラウザまたはサイトではカメラがサポートされていません。HTTPSサイトまたはlocalhostで実行してください。';
+            } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+                message = 'カメラが他のアプリケーションで使用されているか、ハードウェアエラーが発生しています。';
+            } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+                message = '要求されたカメラ設定がサポートされていません。';
+            }
+
+            showError(message);
+        }
+
+        cameraSelect.addEventListener('change', async () => {
+            const id = cameraSelect.value;
+            if (!id) return;
+            await startCamera(false, id);
+        });
+
+        switchBtn.addEventListener('click', async () => {
+            await startCamera(true, null);
+        });
+
+        toggleBtn.addEventListener('click', () => {
+            if (scanning) {
+                stopCamera();
+            } else {
+                startCamera(true, null);
+            }
+        });
+
+        clearBtn.addEventListener('click', () => {
+            resultsEl.innerHTML = '';
+        });
+
+        (async () => {
+            // プロトコルチェック
+            if (location.protocol !== 'https:' && !location.hostname.includes('localhost') && location.hostname !== '127.0.0.1') {
+                document.getElementById('protocolWarning').style.display = 'inline';
+            }
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                showError('このブラウザはカメラアクセスに対応していません。最新のChrome/Edge/Firefox/Safariをお使いください。');
+                return;
+            }
+
+            // Try to detect permission state; do not force a permission prompt here.
+            let permState = null;
+            try {
+                const p = await navigator.permissions.query({ name: 'camera' });
+                permState = p.state; // 'granted', 'denied', or 'prompt'
+
+                // 権限状態の表示
+                if (permState === 'denied') {
+                    showError('カメラ権限が拒否されています。ブラウザの設定からカメラアクセスを許可してください。');
+                }
+            } catch (e) {
+                // Permissions API or 'camera' name not supported in this browser
+                permState = null;
+            }
+
+            await enumerateCameras();
+
+            // Auto-start only if permission already granted; otherwise wait for user action to start camera.
+            if (permState === 'granted') {
+                let environmentDevice = null;
+                for (const d of devices) {
+                    const lab = (d.label || '').toLowerCase();
+                    if (lab.includes('back') || lab.includes('rear') || lab.includes('environment') || lab.includes('背面') || lab.includes('後')) {
+                        environmentDevice = d;
+                        break;
+                    }
+                }
+
+                if (environmentDevice) {
+                    await startCamera(false, environmentDevice.deviceId);
+                } else {
+                    await startCamera(true, null);
+                }
+            } else {
+                // Do not prompt. User can click 起動 to start camera when ready.
+                toggleBtn.textContent = '起動';
+                scanning = false;
+            }
+
+            window.addEventListener('resize', () => {
+                if (video && video.readyState >= 2) resizeCanvases();
+            });
+        })();
+    </script>
+</body>
+
+</html>
