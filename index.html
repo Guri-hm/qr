@@ -15,6 +15,8 @@
     <!-- favicon -->
     <link rel="icon" type="image/svg+xml" href="favicon.svg">
 
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+
     <style>
         /* --- UI調整 --- */
         .row.align-items-end .form-label {
@@ -310,16 +312,51 @@
             rafId = requestAnimationFrame(tick);
         }
 
+        let lastCheckedBtn = null;
+
+
         function addResult(data) {
             const item = document.createElement('a');
-            item.className = 'list-group-item list-group-item-action';
+            item.className = 'list-group-item list-group-item-action d-flex align-items-center';
             item.target = '_blank';
             const isUrl = /^https?:\/\//i.test(data) || /^www\./i.test(data);
             item.href = isUrl ? (data.startsWith('http') ? data : 'http://' + data) : '#';
             item.rel = 'noopener noreferrer';
+            item.title = data; // ツールチップ表示
+
             const time = new Date().toLocaleTimeString();
             const icon = isUrl ? '<span style="color:#0d6efd;">🔗</span> ' : '';
-            item.innerHTML = `<div class="d-flex w-100 justify-content-between"><div class="text-truncate">${icon}${escapeHtml(data)}</div><small class="text-muted">${time}</small></div>`;
+
+            item.innerHTML = `
+        <div class="d-flex w-100 justify-content-between align-items-center">
+            <div class="text-truncate flex-grow-1">${icon}${escapeHtml(data)}</div>
+            <div class="d-flex align-items-center">
+                <small class="text-muted">${time}</small>
+                <span class="ms-2 clipboard-btn" style="cursor:pointer;" title="クリップボードにコピー">
+                    <i class="bi bi-clipboard"></i>
+                </span>
+            </div>
+        </div>
+    `;
+
+            // クリップボードコピー機能
+            const btn = item.querySelector('.clipboard-btn');
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                navigator.clipboard.writeText(data).then(() => {
+                    // 以前のチェックアイコンを戻す
+                    if (lastCheckedBtn && lastCheckedBtn !== btn) {
+                        lastCheckedBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
+                        lastCheckedBtn.title = "クリップボードにコピー";
+                    }
+                    // チェックアイコンに変更
+                    btn.innerHTML = '<i class="bi bi-check"></i>';
+                    btn.title = "コピーしました！";
+                    lastCheckedBtn = btn;
+                });
+            });
+
             resultsEl.prepend(item);
         }
 
